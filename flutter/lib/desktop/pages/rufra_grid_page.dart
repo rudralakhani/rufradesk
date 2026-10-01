@@ -19,6 +19,7 @@ import 'package:get/get.dart';
 const String kRufraGridArg = 'rufra_grid';
 
 const String _kGridStateOption = 'rufra-grid-state';
+const String _kGridEventShow = 'rufra_grid_show';
 const int _kMaxTiles = 10;
 const List<int> _kLayouts = [1, 2, 4, 6, 9, 10];
 const Map<int, int> _kLayoutColumns = {1: 1, 2: 2, 4: 2, 6: 3, 9: 3, 10: 5};
@@ -31,6 +32,8 @@ Future<void> openRufraGridWindow() async {
   if (existing != null) {
     final ids = await DesktopMultiWindow.getAllSubWindowIds();
     if (ids.contains(existing)) {
+      // Closing only hides the window and clears its tab, so ask it to rebuild.
+      await DesktopMultiWindow.invokeMethod(existing, _kGridEventShow, '');
       await WindowController.fromWindowId(existing).show();
       await windowOnTop(existing);
       return;
@@ -337,6 +340,19 @@ class _RufraGridTabPageState extends State<RufraGridTabPage> {
     CanvasModel.useLayoutBox = true;
     tabController =
         Get.put(DesktopTabController(tabType: DesktopTabType.remoteScreen));
+    _addGridTab();
+    rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
+      if (call.method == _kGridEventShow) {
+        if (tabController.state.value.tabs.isEmpty) _addGridTab();
+      } else if (call.method == "onDestroy") {
+        _gridKey.currentState?.closeAll();
+      } else if (call.method == kWindowActionRebuild) {
+        reloadCurrentWindow();
+      }
+    });
+  }
+
+  void _addGridTab() {
     tabController.add(TabInfo(
       key: kRufraGridArg,
       label: translate('Grid view'),
@@ -345,13 +361,6 @@ class _RufraGridTabPageState extends State<RufraGridTabPage> {
       closable: false,
       page: _RufraGrid(key: _gridKey),
     ));
-    rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
-      if (call.method == "onDestroy") {
-        _gridKey.currentState?.closeAll();
-      } else if (call.method == kWindowActionRebuild) {
-        reloadCurrentWindow();
-      }
-    });
   }
 
   int get _windowId => widget.params['windowId'];
@@ -508,6 +517,8 @@ class _RufraGridState extends State<_RufraGrid>
               : _buildEnlargedBar(context, enlarged),
           Expanded(
             child: Stack(
+              // Fill the area even while the grid is offstage (it then sizes to zero).
+              fit: StackFit.expand,
               children: [
                 // Hidden tiles keep their sessions but must not take focus or input.
                 ExcludeFocus(
