@@ -410,6 +410,9 @@ class _RufraGridState extends State<_RufraGrid>
   int _layout = 4;
   List<String?> _tiles = List.filled(_kMaxTiles, null);
   final Map<String, ToolbarState> _toolbarStates = {};
+  // One stable key per peer, so a layout change moves the live session
+  // instead of closing it and reconnecting.
+  final Map<String, GlobalKey> _sessionKeys = {};
 
   @override
   void initState() {
@@ -580,8 +583,7 @@ class _RufraGridState extends State<_RufraGrid>
             child: id == null
                 ? _buildEmptyTile(context, index)
                 : RemotePage(
-                    // A global key keeps the session alive when the layout reflows.
-                    key: GlobalObjectKey('rufra-grid-$id'),
+                    key: _sessionKeys.putIfAbsent(id, () => GlobalKey()),
                     id: id,
                     toolbarState:
                         _toolbarStates.putIfAbsent(id, () => ToolbarState()),
