@@ -414,6 +414,8 @@ class _RufraGridState extends State<_RufraGrid>
   // One stable key per peer, so a layout change moves the live session
   // instead of closing it and reconnecting.
   final Map<String, GlobalKey> _sessionKeys = {};
+  // The peer shown full size; the other tiles stay connected behind it.
+  String? _enlarged;
 
   @override
   void initState() {
@@ -453,7 +455,16 @@ class _RufraGridState extends State<_RufraGrid>
 
   void closeAll() {
     if (!mounted) return;
-    setState(() => _tiles = List.filled(_kMaxTiles, null));
+    setState(() {
+      _enlarged = null;
+      _tiles = List.filled(_kMaxTiles, null);
+    });
+  }
+
+  void _setEnlarged(String? id) {
+    // Drop keyboard focus so typing cannot reach a session that is not visible.
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _enlarged = id);
   }
 
   void _setLayout(int layout) {
@@ -468,6 +479,7 @@ class _RufraGridState extends State<_RufraGrid>
         final old = _tiles.indexOf(id);
         if (old >= 0) _tiles[old] = null;
       }
+      if (_tiles[index] == _enlarged) _enlarged = null;
       _tiles[index] = id;
     });
     _save();
@@ -486,12 +498,84 @@ class _RufraGridState extends State<_RufraGrid>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final enlarged = this.enlarged;
     return Container(
       color: Theme.of(context).colorScheme.background,
       child: Column(
         children: [
-          _buildToolbar(context),
-          Expanded(child: _buildGrid(context)),
+          enlarged == null
+              ? _buildToolbar(context)
+              : _buildEnlargedBar(context, enlarged),
+          Expanded(
+            child: Stack(
+              children: [
+                // Hidden tiles keep their sessions but must not take focus or input.
+                ExcludeFocus(
+                  excluding: enlarged != null,
+                  child: Offstage(
+                    offstage: enlarged != null,
+                    child: _buildGrid(context),
+                  ),
+                ),
+                if (enlarged != null)
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      child: Container(
+                        clipBehavior: Clip.antiAlias,
+                        decoration: BoxDecoration(
+                          color: kColorCanvas,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: MyTheme.accent, width: 2),
+                        ),
+                        child: _sessionView(enlarged),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? get enlarged {
+    final id = _enlarged;
+    // Only a peer still placed in a visible tile can be enlarged.
+    return id != null && _tiles.take(_layout).contains(id) ? id : null;
+  }
+
+  Widget _sessionView(String id) => RemotePage(
+        key: _sessionKeys.putIfAbsent(id, () => GlobalKey()),
+        id: id,
+        toolbarState: _toolbarStates.putIfAbsent(id, () => ToolbarState()),
+      );
+
+  Widget _buildEnlargedBar(BuildContext context, String id) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        children: [
+          ElevatedButton.icon(
+            onPressed: () => _setEnlarged(null),
+            icon: const Icon(Icons.grid_view_rounded, size: 16),
+            label: Text(translate('Back to grid')),
+          ),
+          const SizedBox(width: 16),
+          _StatusDot(id: id),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _peerLabel(id),
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+          Text(
+            translate('Controlling this PC only'),
+            style: TextStyle(color: Theme.of(context).hintColor),
+          ),
         ],
       ),
     );
@@ -583,12 +667,10 @@ class _RufraGridState extends State<_RufraGrid>
           Expanded(
             child: id == null
                 ? _buildEmptyTile(context, index)
-                : RemotePage(
-                    key: _sessionKeys.putIfAbsent(id, () => GlobalKey()),
-                    id: id,
-                    toolbarState:
-                        _toolbarStates.putIfAbsent(id, () => ToolbarState()),
-                  ),
+                // The enlarged peer's session is shown above the grid, not here.
+                : id == _enlarged
+                    ? const SizedBox.shrink()
+                    : _sessionView(id),
           ),
           _buildTileBar(context, index, id),
         ],
@@ -608,7 +690,7 @@ class _RufraGridState extends State<_RufraGrid>
 
   Widget _buildTileBar(BuildContext context, int index, String? id) {
     final style = Theme.of(context).textTheme.bodySmall;
-    return Container(
+    final bar = Container(
       height: 28,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       color: Theme.of(context).cardColor,
@@ -624,6 +706,8 @@ class _RufraGridState extends State<_RufraGrid>
                 style: style?.copyWith(fontWeight: FontWeight.w500),
               ),
             ),
+            _tileButton(Icons.open_in_full, translate('Enlarge'),
+                () => _setEnlarged(id)),
             _tileButton(Icons.swap_horiz, translate('Change PC'),
                 () => _choosePeer(index)),
             _tileButton(Icons.close, translate('Remove from grid'),
@@ -634,6 +718,16 @@ class _RufraGridState extends State<_RufraGrid>
                   style: style?.copyWith(color: Theme.of(context).hintColor)),
             ),
         ],
+      ),
+    );
+    if (id == null) return bar;
+    // Double-click the name bar, not the screen, so the remote PC never gets the click.
+    return Tooltip(
+      message: translate('Double-click to enlarge'),
+      waitDuration: const Duration(seconds: 1),
+      child: GestureDetector(
+        onDoubleTap: () => _setEnlarged(id),
+        child: bar,
       ),
     );
   }
