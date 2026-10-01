@@ -1032,6 +1032,8 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
   @override
   Widget build(BuildContext context) {
     final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+    widget.canvasModel.layoutBox =
+        () => mounted ? context.findRenderObject() as RenderBox? : null;
     return LayoutBuilder(
       builder: (context, constraints) {
         final maxWidth = constraints.maxWidth;
@@ -1041,6 +1043,7 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
           return widget.child;
         }
         final newSize = Size(maxWidth, maxHeight);
+        widget.canvasModel.layoutSize = newSize;
         if (_lastSize != newSize || _lastDevicePixelRatio != devicePixelRatio) {
           _lastSize = newSize;
           _lastDevicePixelRatio = devicePixelRatio;

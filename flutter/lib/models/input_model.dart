@@ -1940,8 +1940,14 @@ class InputModel {
       }
     }
 
-    y -= CanvasModel.topToEdge;
-    x -= CanvasModel.leftToEdge;
+    final layoutOrigin = parent.target!.canvasModel.layoutOrigin;
+    if (layoutOrigin != null) {
+      x -= layoutOrigin.dx;
+      y -= layoutOrigin.dy;
+    } else {
+      y -= CanvasModel.topToEdge;
+      x -= CanvasModel.leftToEdge;
+    }
     if (isMove) {
       final canvasModel = parent.target!.canvasModel;
 

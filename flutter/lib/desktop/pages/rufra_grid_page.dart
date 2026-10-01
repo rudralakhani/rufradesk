@@ -334,6 +334,7 @@ class _RufraGridTabPageState extends State<RufraGridTabPage> {
   @override
   void initState() {
     super.initState();
+    CanvasModel.useLayoutBox = true;
     tabController =
         Get.put(DesktopTabController(tabType: DesktopTabType.remoteScreen));
     tabController.add(TabInfo(

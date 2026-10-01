@@ -2329,7 +2329,25 @@ class CanvasModel with ChangeNotifier {
   static double get bottomToEdge =>
       isDesktop ? windowBorderWidth + kDragToResizeAreaPadding.bottom : 0;
 
+  // RufraDesk grid view: a session fills its tile instead of the whole window,
+  // so geometry comes from the tile's box. Off everywhere except the grid window.
+  static bool useLayoutBox = false;
+  RenderBox? Function()? layoutBox;
+  // Space available to the session view, from its layout constraints. The box's
+  // own size follows the painted image, so it cannot be used for scaling.
+  Size? layoutSize;
+
+  RenderBox? get _attachedLayoutBox {
+    if (!useLayoutBox) return null;
+    final box = layoutBox?.call();
+    return box != null && box.attached && box.hasSize ? box : null;
+  }
+
+  /// The tile's top-left in window coordinates, or null outside the grid view.
+  Offset? get layoutOrigin => _attachedLayoutBox?.localToGlobal(Offset.zero);
+
   Size getSize() {
+    if (useLayoutBox && layoutSize != null) return layoutSize!;
     final mediaData = MediaQueryData.fromView(ui.window);
     final size = mediaData.size;
     // If minimized, w or h may be negative here.
