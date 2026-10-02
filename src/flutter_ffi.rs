@@ -2470,6 +2470,20 @@ pub fn main_has_file_clipboard() -> SyncReturn<bool> {
     SyncReturn(ret)
 }
 
+/// RufraDesk grid "All" mode: send this PC's current clipboard to the connected
+/// sessions before a broadcast paste. The clipboard listener only sends changes,
+/// so a session that missed the change would otherwise paste stale content.
+pub fn main_rufra_sync_clipboard() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(msg) = crate::clipboard::check_clipboard(
+        &mut None,
+        crate::clipboard::ClipboardSide::Client,
+        true,
+    ) {
+        crate::flutter::send_clipboard_msg(msg, false);
+    }
+}
+
 pub fn main_has_gpu_texture_render() -> SyncReturn<bool> {
     SyncReturn(cfg!(feature = "vram"))
 }

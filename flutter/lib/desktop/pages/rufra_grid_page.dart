@@ -3,7 +3,9 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
@@ -64,8 +66,7 @@ Widget buildRufraGridButton(BuildContext context) {
           await openRufraGridWindow();
         }
       },
-      icon: Icon(
-          _isGridLocked() ? Icons.lock_outline : Icons.grid_view_rounded,
+      icon: Icon(_isGridLocked() ? Icons.lock_outline : Icons.grid_view_rounded,
           size: 16),
       label: Text(translate('Grid view')),
     ),
@@ -425,11 +426,198 @@ class _RufraGridState extends State<_RufraGrid>
   final Map<String, GlobalKey> _sessionKeys = {};
   // The peer shown full size; the other tiles stay connected behind it.
   String? _enlarged;
+  // All mode: keyboard and/or mouse input go to every selected tile. With the
+  // keyboard on, tiles cannot take focus, so no single session grabs the keys.
+  bool _allMode = false;
+  bool _allKeyboard = true;
+  bool _allMouse = true;
+  final Set<String> _allSelected = {};
+  final FocusNode _allFocus = FocusNode(debugLabel: 'rufraGridAll');
+  // Buttons held when a broadcast mouse press started, sent again on release.
+  int _allMouseButtons = 0;
+
+  bool get _allKeyboardOn => _allMode && _allKeyboard;
+  bool get _allMouseOn => _allMode && _allMouse;
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _allFocus.dispose();
+    super.dispose();
+  }
+
+  List<String> get _visiblePeers =>
+      _tiles.take(_layout).whereType<String>().toList();
+
+  List<String> get _allTargets =>
+      _visiblePeers.where(_allSelected.contains).toList();
+
+  Future<void> _setAllMode(bool on) async {
+    if (on == _allMode) return;
+    if (!on) {
+      setState(() => _allMode = false);
+      _allFocus.unfocus();
+      return;
+    }
+    final peers = _visiblePeers;
+    if (peers.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(children: [
+          Icon(Icons.warning_amber_rounded,
+              color: Theme.of(context).colorScheme.error),
+          const SizedBox(width: 8),
+          Text(translate('Control all PCs?')),
+        ]),
+        content: Text(
+            '${translate('Your keyboard and mouse will control all')} ${peers.length} ${translate('PCs in this grid at the same time. You can turn either one off in the red bar.')}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(translate('Cancel')),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(translate('Control all')),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    // Leaving the focused tile releases its keyboard grab.
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _allMode = true;
+      _allKeyboard = true;
+      _allMouse = true;
+      _allSelected
+        ..clear()
+        ..addAll(peers);
+    });
+    _allFocus.requestFocus();
+  }
+
+  void _setAllKeyboard(bool on) {
+    // Moving between grid-wide and per-tile keyboard releases the current owner.
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _allKeyboard = on);
+    if (on) _allFocus.requestFocus();
+  }
+
+  List<FFI> get _allTargetFfis => _allTargets
+      .where((id) => Get.isRegistered<FFI>(tag: id))
+      .map((id) => Get.find<FFI>(tag: id))
+      .toList();
+
+  KeyEventResult _onAllModeKey(FocusNode node, KeyEvent e) {
+    // Like a single session: the meta key would take focus away from the window.
+    if ((isWindows || isLinux) &&
+        (e.physicalKey == PhysicalKeyboardKey.metaLeft ||
+            e.physicalKey == PhysicalKeyboardKey.metaRight)) {
+      return KeyEventResult.handled;
+    }
+    if (e is KeyDownEvent && _isPasteShortcut(e)) {
+      // Every PC must hold this PC's clipboard before the paste keys arrive.
+      bind.mainRufraSyncClipboard();
+    }
+    final down = e is KeyDownEvent || e is KeyRepeatEvent;
+    for (final ffi in _allTargetFfis) {
+      final input = ffi.inputModel;
+      if (input.isViewOnly || !input.keyboardPerm) continue;
+      input.newKeyboardMode(
+          e.character ?? '', e.physicalKey.usbHidUsage & 0xFFFF, down, false);
+    }
+    return KeyEventResult.handled;
+  }
+
+  bool _isPasteShortcut(KeyEvent e) {
+    final keyboard = HardwareKeyboard.instance;
+    final modifier =
+        isMacOS ? keyboard.isMetaPressed : keyboard.isControlPressed;
+    return (modifier && e.logicalKey == LogicalKeyboardKey.keyV) ||
+        (keyboard.isShiftPressed && e.logicalKey == LogicalKeyboardKey.insert);
+  }
+
+  /// The pointer's position on [ffi]'s remote screen as fractions (0..1),
+  /// or null when the pointer is not over that tile's image.
+  Offset? _pointOnScreen(FFI ffi, Offset global) {
+    final c = ffi.canvasModel;
+    final origin = c.layoutOrigin;
+    final width = c.getDisplayWidth() * c.scale;
+    final height = c.getDisplayHeight() * c.scale;
+    if (origin == null || width <= 0 || height <= 0) return null;
+    final local = global - origin;
+    final rx = (local.dx - c.x) / width;
+    final ry = (local.dy - c.y) / height;
+    if (rx < 0 || rx > 1 || ry < 0 || ry > 1) return null;
+    return Offset(rx, ry);
+  }
+
+  /// Maps fractions of the remote screen back to [ffi]'s tile in window coordinates.
+  Offset? _globalOnScreen(FFI ffi, Offset point) {
+    final c = ffi.canvasModel;
+    final origin = c.layoutOrigin;
+    if (origin == null) return null;
+    return origin +
+        Offset(c.x + point.dx * c.getDisplayWidth() * c.scale,
+            c.y + point.dy * c.getDisplayHeight() * c.scale);
+  }
+
+  /// Mirrors a pointer event from the tile under the pointer to the other
+  /// selected tiles, at the same relative spot on each remote screen. The tile
+  /// under the pointer handles the event itself.
+  void _broadcastPointer(PointerEvent e) {
+    if (!_allMouseOn || e.kind != PointerDeviceKind.mouse) return;
+    final targets = _allTargetFfis;
+    FFI? source;
+    Offset? point;
+    for (final ffi in targets) {
+      point = _pointOnScreen(ffi, e.position);
+      if (point != null) {
+        source = ffi;
+        break;
+      }
+    }
+    if (source == null || point == null) return;
+    late final String type;
+    late final int buttons;
+    if (e is PointerDownEvent) {
+      type = 'mousedown';
+      buttons = e.buttons;
+      _allMouseButtons = e.buttons;
+    } else if (e is PointerUpEvent) {
+      type = 'mouseup';
+      buttons = _allMouseButtons;
+      _allMouseButtons = 0;
+    } else if (e is PointerMoveEvent || e is PointerHoverEvent) {
+      type = 'mousemove';
+      buttons = e.buttons;
+    } else {
+      return;
+    }
+    for (final ffi in targets) {
+      if (identical(ffi, source) || ffi.inputModel.isViewOnly) continue;
+      final pos = _globalOnScreen(ffi, point);
+      if (pos == null) continue;
+      ffi.inputModel.handleMouse({'type': type, 'buttons': buttons}, pos);
+    }
+  }
+
+  void _broadcastScroll(PointerSignalEvent e) {
+    if (!_allMouseOn) return;
+    final targets = _allTargetFfis;
+    final source =
+        targets.where((f) => _pointOnScreen(f, e.position) != null).firstOrNull;
+    if (source == null) return;
+    for (final ffi in targets) {
+      if (!identical(ffi, source)) ffi.inputModel.onPointerSignalImage(e);
+    }
   }
 
   @override
@@ -466,6 +654,7 @@ class _RufraGridState extends State<_RufraGrid>
     if (!mounted) return;
     setState(() {
       _enlarged = null;
+      _allMode = false;
       _tiles = List.filled(_kMaxTiles, null);
     });
   }
@@ -473,7 +662,11 @@ class _RufraGridState extends State<_RufraGrid>
   void _setEnlarged(String? id) {
     // Drop keyboard focus so typing cannot reach a session that is not visible.
     FocusManager.instance.primaryFocus?.unfocus();
-    setState(() => _enlarged = id);
+    setState(() {
+      _enlarged = id;
+      // An enlarged PC is controlled on its own.
+      if (id != null) _allMode = false;
+    });
   }
 
   void _setLayout(int layout) {
@@ -515,37 +708,116 @@ class _RufraGridState extends State<_RufraGrid>
           enlarged == null
               ? _buildToolbar(context)
               : _buildEnlargedBar(context, enlarged),
+          if (_allMode && enlarged == null) _buildAllModeBanner(context),
           Expanded(
-            child: Stack(
-              // Fill the area even while the grid is offstage (it then sizes to zero).
-              fit: StackFit.expand,
-              children: [
-                // Hidden tiles keep their sessions but must not take focus or input.
-                ExcludeFocus(
-                  excluding: enlarged != null,
-                  child: Offstage(
-                    offstage: enlarged != null,
-                    child: _buildGrid(context),
-                  ),
-                ),
-                if (enlarged != null)
-                  Positioned.fill(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                      child: Container(
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: kColorCanvas,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: MyTheme.accent, width: 2),
-                        ),
-                        child: _sessionView(enlarged),
-                      ),
-                    ),
-                  ),
-              ],
+            child: Focus(
+              focusNode: _allFocus,
+              canRequestFocus: _allKeyboardOn,
+              onKeyEvent: _allKeyboardOn ? _onAllModeKey : null,
+              child: Listener(
+                onPointerDown: (e) {
+                  // Clicking a tile must not move the grid-wide keyboard to it.
+                  if (_allKeyboardOn) _allFocus.requestFocus();
+                  _broadcastPointer(e);
+                },
+                onPointerUp: _broadcastPointer,
+                onPointerMove: _broadcastPointer,
+                onPointerHover: _broadcastPointer,
+                onPointerSignal: _broadcastScroll,
+                child: _buildBody(context, enlarged),
+              ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(BuildContext context, String? enlarged) {
+    return Stack(
+      // Fill the area even while the grid is offstage (it then sizes to zero).
+      fit: StackFit.expand,
+      children: [
+        // Hidden tiles keep their sessions but must not take focus or input.
+        // With the All-mode keyboard on, no tile may take focus, so keys reach the grid.
+        ExcludeFocus(
+          excluding: enlarged != null || _allKeyboardOn,
+          child: Offstage(
+            offstage: enlarged != null,
+            child: _buildGrid(context),
+          ),
+        ),
+        if (enlarged != null)
+          Positioned.fill(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Container(
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: kColorCanvas,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: MyTheme.accent, width: 2),
+                ),
+                child: _sessionView(enlarged),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildAllModeBanner(BuildContext context) {
+    final error = Theme.of(context).colorScheme.error;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: error.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: error),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, color: error, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '${translate('Controlling')} ${_allTargets.length} ${translate('of')} ${_visiblePeers.length} ${translate('PCs at once')}',
+              style: TextStyle(color: error, fontWeight: FontWeight.w500),
+            ),
+          ),
+          _allModeOption(Icons.keyboard_outlined, translate('Keyboard'),
+              _allKeyboard, _setAllKeyboard),
+          const SizedBox(width: 12),
+          _allModeOption(Icons.mouse_outlined, translate('Mouse'), _allMouse,
+              (v) => setState(() => _allMouse = v)),
+          const SizedBox(width: 12),
+          TextButton(
+            onPressed: () => _setAllMode(false),
+            child: Text(translate('Stop')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _allModeOption(
+      IconData icon, String label, bool value, ValueChanged<bool> onChanged) {
+    return InkWell(
+      onTap: () => onChanged(!value),
+      borderRadius: BorderRadius.circular(4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Checkbox(
+            value: value,
+            visualDensity: VisualDensity.compact,
+            onChanged: (v) => onChanged(v ?? false),
+          ),
+          Icon(icon, size: 16),
+          const SizedBox(width: 4),
+          Text(label),
+          const SizedBox(width: 4),
         ],
       ),
     );
@@ -612,6 +884,29 @@ class _RufraGridState extends State<_RufraGrid>
             selected: {_layout},
             onSelectionChanged: (s) => _setLayout(s.first),
           ),
+          const SizedBox(width: 24),
+          Text(translate('Control'),
+              style: TextStyle(color: Theme.of(context).hintColor)),
+          const SizedBox(width: 8),
+          SegmentedButton<bool>(
+            showSelectedIcon: false,
+            style: ButtonStyle(
+              visualDensity: VisualDensity.compact,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            segments: [
+              ButtonSegment<bool>(
+                  value: false,
+                  icon: const Icon(Icons.mouse_outlined, size: 16),
+                  label: Text(translate('Individual'))),
+              ButtonSegment<bool>(
+                  value: true,
+                  icon: const Icon(Icons.keyboard_outlined, size: 16),
+                  label: Text(translate('All'))),
+            ],
+            selected: {_allMode},
+            onSelectionChanged: (s) => _setAllMode(s.first),
+          ),
           const Spacer(),
           Text(
             '${_tiles.take(_layout).where((e) => e != null).length} / $_layout',
@@ -666,12 +961,15 @@ class _RufraGridState extends State<_RufraGrid>
 
   Widget _buildTile(BuildContext context, int index) {
     final id = _tiles[index];
+    final inAll = _allMode && id != null && _allSelected.contains(id);
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: kColorCanvas,
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: MyTheme.color(context).border!),
+        border: inAll
+            ? Border.all(color: Theme.of(context).colorScheme.error, width: 2)
+            : Border.all(color: MyTheme.color(context).border!),
       ),
       child: Column(
         children: [
@@ -708,7 +1006,24 @@ class _RufraGridState extends State<_RufraGrid>
       child: Row(
         children: [
           if (id != null) ...[
-            _StatusDot(id: id),
+            if (_allMode)
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: Checkbox(
+                  value: _allSelected.contains(id),
+                  visualDensity: VisualDensity.compact,
+                  onChanged: (v) => setState(() {
+                    if (v == true) {
+                      _allSelected.add(id);
+                    } else {
+                      _allSelected.remove(id);
+                    }
+                  }),
+                ),
+              )
+            else
+              _StatusDot(id: id),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
@@ -874,8 +1189,7 @@ class _ChoosePeerDialogState extends State<_ChoosePeerDialog> {
                       child: Text(
                           translate(
                               'No favorites yet. Type a remote ID above to add one.'),
-                          style:
-                              TextStyle(color: Theme.of(context).hintColor)),
+                          style: TextStyle(color: Theme.of(context).hintColor)),
                     )
                   : ListView(
                       shrinkWrap: true,
