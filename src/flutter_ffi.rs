@@ -625,6 +625,40 @@ pub fn session_handle_flutter_key_event(
     }
 }
 
+/// RufraDesk grid "All" mode: deliver one local key event to several sessions.
+/// Only the first delivery goes through the long-press filter; see
+/// `keyboard::client::RUFRA_SKIP_LONG_PRESS`.
+pub fn session_rufra_broadcast_key_event(
+    session_ids: Vec<String>,
+    character: String,
+    usb_hid: i32,
+    lock_modes: i32,
+    down_or_up: bool,
+) {
+    use std::sync::atomic::Ordering;
+    let skip = &crate::keyboard::client::RUFRA_SKIP_LONG_PRESS;
+    let mut first = true;
+    for id in session_ids {
+        let Ok(id) = SessionID::parse_str(&id) else {
+            continue;
+        };
+        let Some(session) = sessions::get_session_by_session_id(&id) else {
+            continue;
+        };
+        let keyboard_mode = session.get_keyboard_mode();
+        skip.store(!first, Ordering::Relaxed);
+        session.handle_flutter_key_event(
+            &keyboard_mode,
+            &character,
+            usb_hid,
+            lock_modes,
+            down_or_up,
+        );
+        first = false;
+    }
+    skip.store(false, Ordering::Relaxed);
+}
+
 pub fn session_handle_flutter_raw_key_event(
     session_id: SessionID,
     name: String,
@@ -2480,7 +2514,10 @@ pub fn main_rufra_sync_clipboard() {
         crate::clipboard::ClipboardSide::Client,
         true,
     ) {
+        log::info!("RufraDesk grid: sending the clipboard to all sessions");
         crate::flutter::send_clipboard_msg(msg, false);
+    } else {
+        log::info!("RufraDesk grid: no clipboard text to send");
     }
 }
 

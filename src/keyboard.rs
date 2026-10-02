@@ -329,6 +329,12 @@ pub mod client {
         }
     }
 
+    // RufraDesk grid "All" mode repeats one local key event to several sessions.
+    // The first delivery marks a modifier as held, so the repeats must skip the
+    // long-press filter or Ctrl/Shift would be dropped for every other session.
+    pub static RUFRA_SKIP_LONG_PRESS: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     pub fn process_event_with_session<T: InvokeUiSession>(
         keyboard_mode: &str,
         event: &Event,
@@ -336,7 +342,9 @@ pub mod client {
         session: &Session<T>,
     ) {
         let keyboard_mode = get_keyboard_mode_enum(keyboard_mode);
-        if is_long_press(&event) {
+        if !RUFRA_SKIP_LONG_PRESS.load(std::sync::atomic::Ordering::Relaxed)
+            && is_long_press(&event)
+        {
             return;
         }
         let peer = session.peer_platform().to_lowercase();

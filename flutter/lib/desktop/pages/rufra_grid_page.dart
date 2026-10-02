@@ -522,19 +522,48 @@ class _RufraGridState extends State<_RufraGrid>
             e.physicalKey == PhysicalKeyboardKey.metaRight)) {
       return KeyEventResult.handled;
     }
-    if (e is KeyDownEvent && _isPasteShortcut(e)) {
-      // Every PC must hold this PC's clipboard before the paste keys arrive.
-      bind.mainRufraSyncClipboard();
-    }
+    final isPaste = e is KeyDownEvent && _isPasteShortcut(e);
+    final character = e.character ?? '';
+    final usbHid = e.physicalKey.usbHidUsage & 0xFFFF;
     final down = e is KeyDownEvent || e is KeyRepeatEvent;
-    for (final ffi in _allTargetFfis) {
-      final input = ffi.inputModel;
-      if (input.isViewOnly || !input.keyboardPerm) continue;
-      input.newKeyboardMode(
-          e.character ?? '', e.physicalKey.usbHidUsage & 0xFFFF, down, false);
-    }
+    // Keys are queued so the paste can wait for the clipboard without later
+    // keys (such as the V release) overtaking it.
+    _allKeyQueue = _allKeyQueue.then((_) async {
+      if (isPaste) {
+        // Every PC must hold this PC's clipboard before the paste key arrives,
+        // and the remote side needs a moment to apply it.
+        debugPrint('RufraDesk grid: paste to ${_allTargets.length} PCs');
+        bind.mainRufraSyncClipboard();
+        await Future.delayed(const Duration(milliseconds: 250));
+      }
+      if (!mounted) return;
+      final sessionIds = _allTargetFfis
+          .where((f) => !f.inputModel.isViewOnly && f.inputModel.keyboardPerm)
+          .map((f) => f.sessionId.toString())
+          .toList();
+      if (sessionIds.isEmpty) return;
+      // One call for all PCs, so a held Ctrl/Shift is not taken for a repeat.
+      await bind.sessionRufraBroadcastKeyEvent(
+          sessionIds: sessionIds,
+          character: character,
+          usbHid: usbHid,
+          lockModes: _lockModes(),
+          downOrUp: down);
+    });
     return KeyEventResult.handled;
   }
+
+  // Same bits as InputModel uses: 1 caps lock, 2 num lock, 3 scroll lock.
+  int _lockModes() {
+    final enabled = HardwareKeyboard.instance.lockModesEnabled;
+    var modes = 0;
+    if (enabled.contains(KeyboardLockMode.capsLock)) modes |= 1 << 1;
+    if (enabled.contains(KeyboardLockMode.numLock)) modes |= 1 << 2;
+    if (enabled.contains(KeyboardLockMode.scrollLock)) modes |= 1 << 3;
+    return modes;
+  }
+
+  Future<void> _allKeyQueue = Future.value();
 
   bool _isPasteShortcut(KeyEvent e) {
     final keyboard = HardwareKeyboard.instance;
