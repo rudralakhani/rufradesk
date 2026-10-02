@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
+import 'package:flutter_hbb/desktop/pages/rufra_send_files.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -935,6 +936,18 @@ class _RufraGridState extends State<_RufraGrid>
             ],
             selected: {_allMode},
             onSelectionChanged: (s) => _setAllMode(s.first),
+          ),
+          const SizedBox(width: 16),
+          OutlinedButton.icon(
+            onPressed: _visiblePeers.isEmpty
+                ? null
+                : () => showRufraSendFiles(context, {
+                      // In All mode, offer the ticked PCs; otherwise every PC shown.
+                      for (final id in _allMode ? _allTargets : _visiblePeers)
+                        id: _peerLabel(id),
+                    }),
+            icon: const Icon(Icons.upload_file, size: 16),
+            label: Text(translate('Send files')),
           ),
           const Spacer(),
           Text(
