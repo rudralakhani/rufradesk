@@ -42,8 +42,42 @@ class _PeerSend {
   _SendState state = _SendState.waiting;
   double progress = 0;
   String error = '';
+  // Folder the files were written to on that PC.
+  String savedTo = '';
 
   _PeerSend(this.id, this.label);
+}
+
+/// Where the files go on each PC. The named folders are inside that PC's user
+/// folder; [custom] is a path typed by the user.
+enum _Destination { desktop, documents, downloads, custom }
+
+extension on _Destination {
+  String get label {
+    switch (this) {
+      case _Destination.desktop:
+        return translate('Desktop');
+      case _Destination.documents:
+        return translate('Documents');
+      case _Destination.downloads:
+        return translate('Downloads');
+      case _Destination.custom:
+        return translate('Custom folder');
+    }
+  }
+
+  String get folderName {
+    switch (this) {
+      case _Destination.desktop:
+        return 'Desktop';
+      case _Destination.documents:
+        return 'Documents';
+      case _Destination.downloads:
+        return 'Downloads';
+      case _Destination.custom:
+        return '';
+    }
+  }
 }
 
 class _SendFilesDialog extends StatefulWidget {
@@ -61,6 +95,9 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
       widget.peers.entries.map((e) => _PeerSend(e.key, e.value)).toList();
   bool _started = false;
   final List<FFI> _sessions = [];
+  _Destination _destination = _Destination.desktop;
+  final _customFolder = TextEditingController();
+  String? _customError;
 
   bool get _running => _peers.any(
       (p) => p.state == _SendState.connecting || p.state == _SendState.sending);
@@ -70,10 +107,16 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
     for (final ffi in _sessions) {
       _closeSession(ffi);
     }
+    _customFolder.dispose();
     super.dispose();
   }
 
   Future<void> _start() async {
+    if (_destination == _Destination.custom &&
+        _customFolder.text.trim().isEmpty) {
+      setState(() => _customError = translate('Enter a folder'));
+      return;
+    }
     setState(() => _started = true);
     // Each PC gets its own file-transfer connection; they run side by side.
     await Future.wait(
@@ -101,7 +144,8 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
             'Could not connect. Check that the PC is online and its password is saved.');
       }
       final isWindows = ffi.ffiModel.pi.platform == kPeerPlatformWindows;
-      final targetDir = PathUtil.join(remote.homePath, 'Desktop', isWindows);
+      final targetDir = _targetDir(remote.homePath, isWindows);
+      _update(peer, () => peer.savedTo = targetDir);
       final jobs = ffi.fileModel.jobController;
       final jobIds = <int>[];
       for (final path in widget.files) {
@@ -144,6 +188,18 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
       await _closeSession(ffi);
       if (Get.isRegistered<FFI>(tag: tag)) await Get.delete<FFI>(tag: tag);
     }
+  }
+
+  /// A custom folder that is not a full path is taken as inside the user folder.
+  String _targetDir(String home, bool isWindows) {
+    if (_destination != _Destination.custom) {
+      return PathUtil.join(home, _destination.folderName, isWindows);
+    }
+    final folder = _customFolder.text.trim();
+    final context = isWindows ? p.windows : p.posix;
+    return context.isAbsolute(folder)
+        ? context.normalize(folder)
+        : PathUtil.join(home, folder, isWindows);
   }
 
   Future<bool> _waitFor(bool Function() condition) async {
@@ -234,10 +290,45 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Text(translate('Save to')),
+                const SizedBox(width: 12),
+                DropdownButton<_Destination>(
+                  value: _destination,
+                  isDense: true,
+                  onChanged: _started
+                      ? null
+                      : (v) => setState(() {
+                            _destination = v ?? _Destination.desktop;
+                            _customError = null;
+                          }),
+                  items: _Destination.values
+                      .map((d) =>
+                          DropdownMenuItem(value: d, child: Text(d.label)))
+                      .toList(),
+                ),
+              ],
+            ),
+            if (_destination == _Destination.custom)
+              TextField(
+                controller: _customFolder,
+                enabled: !_started,
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: r'D:\Shared',
+                  helperText: translate(
+                      "A full path, or a folder inside the PC's user folder. It is created if missing."),
+                  errorText: _customError,
+                ),
+                onChanged: (_) {
+                  if (_customError != null) setState(() => _customError = null);
+                },
+              ),
             const SizedBox(height: 4),
             Text(
-              translate(
-                  "They are saved on each PC's Desktop. Files with the same name are replaced."),
+              translate('Files with the same name are replaced.'),
               style: TextStyle(color: Theme.of(context).hintColor),
             ),
             const SizedBox(height: 12),
@@ -256,6 +347,10 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
                           : (v) => setState(() => peer.selected = v ?? false),
                     ),
                     title: Text(peer.label, overflow: TextOverflow.ellipsis),
+                    subtitle: peer.savedTo.isEmpty
+                        ? null
+                        : SelectableText(peer.savedTo,
+                            style: Theme.of(context).textTheme.bodySmall),
                     trailing: _status(context, peer),
                   );
                 }).toList(),
