@@ -144,7 +144,7 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
             'Could not connect. Check that the PC is online and its password is saved.');
       }
       final isWindows = ffi.ffiModel.pi.platform == kPeerPlatformWindows;
-      final targetDir = _targetDir(remote.homePath, isWindows);
+      final targetDir = await _targetDir(ffi, remote.homePath, isWindows);
       _update(peer, () => peer.savedTo = targetDir);
       final jobs = ffi.fileModel.jobController;
       final jobIds = <int>[];
@@ -191,15 +191,43 @@ class _SendFilesDialogState extends State<_SendFilesDialog> {
   }
 
   /// A custom folder that is not a full path is taken as inside the user folder.
-  String _targetDir(String home, bool isWindows) {
+  Future<String> _targetDir(FFI ffi, String home, bool isWindows) async {
     if (_destination != _Destination.custom) {
-      return PathUtil.join(home, _destination.folderName, isWindows);
+      return _knownFolder(ffi, home, _destination.folderName, isWindows);
     }
     final folder = _customFolder.text.trim();
     final context = isWindows ? p.windows : p.posix;
     return context.isAbsolute(folder)
         ? context.normalize(folder)
         : PathUtil.join(home, folder, isWindows);
+  }
+
+  /// Windows often moves Desktop and Documents into OneDrive (OneDrive backup).
+  /// The folder the user actually sees is then inside OneDrive, so use it when
+  /// one of the user's OneDrive folders has it.
+  Future<String> _knownFolder(
+      FFI ffi, String home, String name, bool isWindows) async {
+    final fallback = PathUtil.join(home, name, isWindows);
+    if (!isWindows || name == 'Downloads') return fallback;
+    try {
+      final fetcher = ffi.fileModel.fileFetcher;
+      const timeout = Duration(seconds: 10);
+      final homeDir =
+          await fetcher.fetchDirectory(home, false, false).timeout(timeout);
+      final oneDrives = homeDir.entries
+          .where((e) => e.isDirectory && e.name.startsWith('OneDrive'));
+      for (final oneDrive in oneDrives) {
+        final path = PathUtil.join(home, oneDrive.name, isWindows);
+        final dir =
+            await fetcher.fetchDirectory(path, false, false).timeout(timeout);
+        if (dir.entries.any((e) => e.isDirectory && e.name == name)) {
+          return PathUtil.join(path, name, isWindows);
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to look for a OneDrive $name folder: $e');
+    }
+    return fallback;
   }
 
   Future<bool> _waitFor(bool Function() condition) async {
