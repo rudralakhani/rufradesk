@@ -340,8 +340,8 @@ class _RufraGridTabPageState extends State<RufraGridTabPage> {
   void initState() {
     super.initState();
     CanvasModel.useLayoutBox = true;
-    tabController =
-        Get.put(DesktopTabController(tabType: DesktopTabType.remoteScreen));
+    tabController = Get.put<DesktopTabController>(_GridTabController(
+        onCloseSession: (id) => _gridKey.currentState?.stopSession(id)));
     _addGridTab();
     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
       if (call.method == _kGridEventShow) {
@@ -407,6 +407,25 @@ class _RufraGridTabPageState extends State<RufraGridTabPage> {
               windowId: _windowId,
             ),
           );
+  }
+}
+
+/// The grid window's only tab is the grid. A session asking to close its tab
+/// (Cancel while connecting, or OK after the PC ended the session) passes no
+/// usable key, so stop that one tile instead of closing the grid.
+class _GridTabController extends DesktopTabController {
+  final void Function(String? peerId) onCloseSession;
+
+  _GridTabController({required this.onCloseSession})
+      : super(tabType: DesktopTabType.remoteScreen);
+
+  @override
+  void closeBy(String? key) {
+    if (key == kRufraGridArg) {
+      super.closeBy(key);
+    } else {
+      onCloseSession(key);
+    }
   }
 }
 
@@ -680,6 +699,20 @@ class _RufraGridState extends State<_RufraGrid>
         value: jsonEncode({'layout': _layout, 'tiles': _tiles}));
   }
 
+  // Peers whose session was closed in the grid; their tile waits for Connect.
+  final Set<String> _stopped = {};
+  // The tile clicked last, which owns a Cancel/OK button that closes a session.
+  String? _lastClickedPeer;
+
+  void stopSession(String? id) {
+    id ??= _lastClickedPeer;
+    if (!mounted || id == null || !_tiles.contains(id)) return;
+    setState(() {
+      _stopped.add(id!);
+      if (_enlarged == id) _enlarged = null;
+    });
+  }
+
   void closeAll() {
     if (!mounted) return;
     setState(() {
@@ -712,6 +745,7 @@ class _RufraGridState extends State<_RufraGrid>
         if (old >= 0) _tiles[old] = null;
       }
       if (_tiles[index] == _enlarged) _enlarged = null;
+      if (id != null) _stopped.remove(id);
       _tiles[index] = id;
     });
     _save();
@@ -1013,17 +1047,40 @@ class _RufraGridState extends State<_RufraGrid>
             ? Border.all(color: Theme.of(context).colorScheme.error, width: 2)
             : Border.all(color: MyTheme.color(context).border!),
       ),
+      child: Listener(
+        onPointerDown: (_) => _lastClickedPeer = id,
+        child: Column(
+          children: [
+            Expanded(
+              child: id == null
+                  ? _buildEmptyTile(context, index)
+                  : _stopped.contains(id)
+                      ? _buildStoppedTile(context, id)
+                      // The enlarged peer's session is shown above the grid, not here.
+                      : id == _enlarged
+                          ? const SizedBox.shrink()
+                          : _sessionView(id),
+            ),
+            _buildTileBar(context, index, id),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStoppedTile(BuildContext context, String id) {
+    return Center(
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: id == null
-                ? _buildEmptyTile(context, index)
-                // The enlarged peer's session is shown above the grid, not here.
-                : id == _enlarged
-                    ? const SizedBox.shrink()
-                    : _sessionView(id),
+          Text(translate('Disconnected'),
+              style: const TextStyle(color: Colors.white70)),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () => setState(() => _stopped.remove(id)),
+            icon: const Icon(Icons.refresh, size: 16),
+            label: Text(translate('Connect')),
           ),
-          _buildTileBar(context, index, id),
         ],
       ),
     );
